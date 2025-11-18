@@ -1,8 +1,8 @@
 # Find A Grant Submissions API to CSV converter
 
 ## Prerequisites
-`python3` on path
-`curl` on path
+* `python3` on path
+* `curl` on path
 
 ## How to use
 ```
