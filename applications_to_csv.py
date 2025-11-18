@@ -15,23 +15,6 @@ USAGE (examples)
       --api-base 'https://api.example.gov.uk' \
       --ggis-reference-number 'XX-XXXX-YYYY' \
       --api-key 'YOUR_API_KEY'
-
-    # Slower throttle and TSV:
-    ./applications_to_csv.py applications.tsv \
-      --api-base 'https://api.example.gov.uk' \
-      --ggis-reference-number 'XX-XXXX-YYYY' \
-      --api-key 'YOUR_API_KEY' \
-      --sleep-seconds 1.5 \
-      --delimiter '\t'
-
-    # Keep constant columns and include section-title prefixes + question IDs:
-    ./applications_to_csv.py applications.csv \
-      --api-base 'https://api.example.gov.uk' \
-      --ggis-reference-number 'XX-XXXX-YYYY' \
-      --api-key 'YOUR_API_KEY' \
-      --keep-constants \
-      --prefix-section-title \
-      --include-question-id
 """
 
 from __future__ import annotations
@@ -40,13 +23,16 @@ import argparse
 import csv
 import json
 import random
-import re
 import subprocess
 import sys
 import time
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
+
+# Throttle delay (seconds) between paginated curl requests
+PAGE_REQUEST_DELAY = 0
 
 # ------------------------- helpers -------------------------
 
@@ -248,9 +234,10 @@ def aggregate_all_pages_curl(
     def extend_top_subs(target: Dict[str, Any], page_data: Dict[str, Any]) -> None:
         target.setdefault("submissions", []).extend(page_data.get("submissions", []) or [])
 
-    param = "pageNumber"  # change to "page" if your environment uses ?page=
+    param = "pageNumber" 
     for p in range(2, total_pages + 1):
         url_p = add_page_param(base_url, param, p)
+        time.sleep(0.5)
         page_data = run_curl_json(
             curl_path, url_p, api_key,
         )
@@ -379,20 +366,13 @@ def parse_args() -> argparse.Namespace:
 # ------------------------- Main -------------------------
 
 def main() -> None:
+    start_time = time.time()
     args = parse_args()
 
-
     def to_snake_case(s):
-        import re
         s = re.sub(r'[^A-Za-z0-9]+', '_', s)
         s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
         return s.strip('_').lower()
-
-
-    # Construct base submissions URL from arguments (must be before output filename logic)
-    if "{ggisReferenceNumber}" not in args.submissions_path:
-        print("ERROR: --submissions-path must include '{ggisReferenceNumber}' placeholder.", file=sys.stderr)
-        sys.exit(2)
     path = args.submissions_path.replace("{ggisReferenceNumber}", args.ggis_reference_number)
     api_base = args.api_base.rstrip("/")
     if not path.startswith("/"):
@@ -498,7 +478,10 @@ def main() -> None:
         for r in rows:
             writer.writerow(r)
 
+    elapsed = time.time() - start_time
+    num_apps = len(rows)
     print(f"Output written to: {out_path}")
+    print(f"Retrieved {num_apps} applications in {elapsed:.2f} seconds")
 
 if __name__ == "__main__":
     main()
