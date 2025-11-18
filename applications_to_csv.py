@@ -423,7 +423,51 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    out_path: Path = args.output_csv or Path("applications.csv")
+
+    def to_snake_case(s):
+        import re
+        s = re.sub(r'[^A-Za-z0-9]+', '_', s)
+        s = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', s)
+        return s.strip('_').lower()
+
+
+    # Construct base submissions URL from arguments (must be before output filename logic)
+    if "{ggisReferenceNumber}" not in args.submissions_path:
+        print("ERROR: --submissions-path must include '{ggisReferenceNumber}' placeholder.", file=sys.stderr)
+        sys.exit(2)
+    path = args.submissions_path.replace("{ggisReferenceNumber}", args.ggis_reference_number)
+    api_base = args.api_base.rstrip("/")
+    if not path.startswith("/"):
+        path = "/" + path
+    base_url = f"{api_base}{path}"
+
+    # Default output filename: $applicationFormName (snake_case)-YYYY-MM-DD.csv
+    if args.output_csv:
+        out_path = args.output_csv
+    else:
+        # Fetch applicationFormName from the first application (if available)
+        merged_preview = aggregate_all_pages_curl(
+            args.curl_path,
+            base_url,
+            args.api_key,
+            sleep_seconds=args.sleep_seconds,
+            user_agent=args.user_agent,
+            timeout=args.timeout_seconds,
+            curl_retries=args.curl_retries,
+            backoff_base=args.backoff_base,
+            backoff_cap=args.backoff_cap,
+            verbose=args.verbose,
+        )
+        app_name = None
+        if 'applications' in merged_preview:
+            if isinstance(merged_preview['applications'], list) and merged_preview['applications']:
+                app_name = merged_preview['applications'][0].get('applicationFormName')
+            elif isinstance(merged_preview['applications'], dict):
+                app_name = merged_preview['applications'].get('applicationFormName')
+        if not app_name:
+            app_name = 'applications'
+        today = __import__('datetime').date.today()
+        out_path = Path(f"{to_snake_case(app_name)}-{today.year}-{today.month:02d}-{today.day:02d}.csv")
 
     # Construct base submissions URL from arguments
     if "{ggisReferenceNumber}" not in args.submissions_path:
@@ -510,6 +554,8 @@ def main() -> None:
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+
+    print(f"Output written to: {out_path}")
 
 if __name__ == "__main__":
     main()

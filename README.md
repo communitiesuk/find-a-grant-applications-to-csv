@@ -9,3 +9,8 @@
 ## How to use
 ```
 ./applications_to_csv.py --api-base <URL> --ggis-reference-number <GGIS_REFERENCE_NUMBER> --api-key <API>
+```
+### How to run tests
+```
+python3 -m unittest
+```
