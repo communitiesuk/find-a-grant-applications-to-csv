@@ -222,19 +222,9 @@ def aggregate_all_pages_curl(
     curl_path: str,
     base_url: str,
     api_key: str,
-    *,
-    sleep_seconds: float,
-    user_agent: str,
-    timeout: int,
-    curl_retries: int,
-    backoff_base: float,
-    backoff_cap: float,
-    verbose: bool,
 ) -> Dict[str, Any]:
     first = run_curl_json(
         curl_path, base_url, api_key,
-        user_agent=user_agent, timeout=timeout, max_retries=curl_retries,
-        backoff_base=backoff_base, backoff_cap=backoff_cap, verbose=verbose,
     )
     total_pages = max(find_total_pages(first), 1)
     if total_pages <= 1:
@@ -261,11 +251,8 @@ def aggregate_all_pages_curl(
     param = "pageNumber"  # change to "page" if your environment uses ?page=
     for p in range(2, total_pages + 1):
         url_p = add_page_param(base_url, param, p)
-        time.sleep(max(0.0, sleep_seconds))  # throttle
         page_data = run_curl_json(
             curl_path, url_p, api_key,
-            user_agent=user_agent, timeout=timeout, max_retries=curl_retries,
-            backoff_base=backoff_base, backoff_cap=backoff_cap, verbose=verbose,
         )
         extend_app_list(merged, page_data)
         extend_app_obj(merged, page_data)
@@ -387,35 +374,6 @@ def parse_args() -> argparse.Namespace:
                     help="Path template for submissions endpoint, must include {ggisReferenceNumber}")
     ap.add_argument("--ggis-reference-number", required=True, help="GGIS reference number to insert into {ggisReferenceNumber} path template")
     ap.add_argument("--api-key", required=True, help="API key for the 'x-api-key' header (REQUIRED)")
-    ap.add_argument("--curl-path", default="curl", help="Path to curl binary")
-    ap.add_argument("--sleep-seconds", type=float, default=1.0, help="Seconds to sleep between page requests")
-    ap.add_argument("--user-agent", default="curl/8.6.0", help="User-Agent to send via curl (-A)")
-    ap.add_argument("--timeout-seconds", type=int, default=60, help="Per-call curl max time")
-    ap.add_argument("--curl-retries", type=int, default=3, help="Retries for curl non-zero exits")
-    ap.add_argument("--backoff-base", type=float, default=0.4, help="Base backoff (curl retry) seconds")
-    ap.add_argument("--backoff-cap", type=float, default=4.0, help="Max backoff cap (curl retry) seconds")
-    ap.add_argument("--verbose", action="store_true", help="Print progress to stderr")
-    ap.add_argument("--delimiter", default=",", help="CSV delimiter (',' or '\\t')")
-
-    # Column naming tweaks for question columns
-    ap.add_argument("--prefix-section-title", action="store_true", help="Prefix question headers with sectionTitle__")
-    ap.add_argument("--include-question-id", action="store_true", help="Append __<questionId> to question headers")
-
-    # Section separator columns
-    gsep = ap.add_mutually_exclusive_group()
-    gsep.add_argument("--section-separators", dest="section_separators", action="store_true", help="Insert 'Section: <name>' separator columns")
-    gsep.add_argument("--no-section-separators", dest="section_separators", action="store_false", help="Do not insert section separators")
-    ap.set_defaults(section_separators=True)
-
-    # Constant-column handling
-    g = ap.add_mutually_exclusive_group()
-    g.add_argument("--drop-constant-columns", dest="drop_constants", action="store_true", help="Drop constant-value columns")
-    g.add_argument("--keep-constants", dest="drop_constants", action="store_false", help="Keep constant-value columns")
-    ap.set_defaults(drop_constants=True)
-
-    ap.add_argument("--constant-ignore-empty", action="store_true", help="Ignore empties when testing constancy")
-    ap.add_argument("--keep-col", action="append", default=[], help="Regex (repeatable) of columns to force-keep")
-
     return ap.parse_args()
 
 # ------------------------- Main -------------------------
@@ -447,16 +405,9 @@ def main() -> None:
     else:
         # Fetch applicationFormName from the first application (if available)
         merged_preview = aggregate_all_pages_curl(
-            args.curl_path,
+            "curl",
             base_url,
             args.api_key,
-            sleep_seconds=args.sleep_seconds,
-            user_agent=args.user_agent,
-            timeout=args.timeout_seconds,
-            curl_retries=args.curl_retries,
-            backoff_base=args.backoff_base,
-            backoff_cap=args.backoff_cap,
-            verbose=args.verbose,
         )
         app_name = None
         if 'applications' in merged_preview:
@@ -481,16 +432,9 @@ def main() -> None:
 
     # 1) Aggregate all pages via curl (throttled)
     merged = aggregate_all_pages_curl(
-        args.curl_path,
+        "curl",
         base_url,
         args.api_key,
-        sleep_seconds=args.sleep_seconds,
-        user_agent=args.user_agent,
-        timeout=args.timeout_seconds,
-        curl_retries=args.curl_retries,
-        backoff_base=args.backoff_base,
-        backoff_cap=args.backoff_cap,
-        verbose=args.verbose,
     )
 
     # 2) Extract rows (meta + questions + per-row ordered blocks)
@@ -508,9 +452,9 @@ def main() -> None:
     for root_meta, sub in pairs:
         meta, dyn, blocks = extract_row(
             root_meta, sub,
-            include_qid=args.include_question_id,
-            prefix_section=args.prefix_section_title,
-            add_section_separators=args.section_separators,
+            include_qid=False,
+            prefix_section=False,
+            add_section_separators=True,
         )
         cache.append((meta, dyn, blocks))
         all_cols_seen.update(meta.keys())
@@ -535,13 +479,12 @@ def main() -> None:
         row.update(dyn)
         rows.append(row)
 
-    # 4) Drop constant columns unless disabled (NEVER drop “Section: …”)
-    if args.drop_constants and rows:
-        keep_patterns = [re.compile(p) for p in (args.keep_col or [])]
-        keep_patterns.append(re.compile(r"^Section:\s"))  # keep all section separators
+    # 4) Always drop constant columns (except section separators)
+    if rows:
+        keep_patterns = [re.compile(r"^Section:\s")]  # keep all section separators
         rows, _ = drop_constant_columns(
             rows,
-            ignore_empty=args.constant_ignore_empty,
+            ignore_empty=False,
             keep_patterns=keep_patterns,
         )
         if rows:
@@ -550,7 +493,7 @@ def main() -> None:
     # 5) Write CSV
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=final_headers, extrasaction="ignore", delimiter=args.delimiter)
+        writer = csv.DictWriter(f, fieldnames=final_headers, extrasaction="ignore", delimiter=",")
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
