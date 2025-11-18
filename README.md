@@ -3,30 +3,27 @@
 
 ## Prerequisites
 * `python3` on path
-* [uv](https://github.com/astral-sh/uv) (for fast virtualenv and dependency management)
+* `uv`
 * A GGIS reference number for a grant
-* An API key for the Cabinet Office Find A Grant API
+* An API key and hostname for the Cabinet Office Find A Grant API
 
+## Setup
 
-## Setup (recommended: using [uv](https://github.com/astral-sh/uv) and pyproject.toml)
+Sync dependencies and create a virtual environment:
+```
+uv venv
+uv sync
+```
 
-1. Install [uv](https://github.com/astral-sh/uv) if you don't have it:
-	```sh
-	curl -LsSf https://astral.sh/uv/install.sh | sh
-	```
+## How to run the script
 
-2. Sync dependencies and create a virtual environment:
-	```sh
-	uv venv
-	uv sync
-	```
+Run the script using uv run (no need to activate the venv):
 
-3. Run the script using uv run (no need to activate the venv):
-	```sh
-	uv run python applications_to_csv.py --api-base <URL> --ggis-reference-number <GGIS_REFERENCE_NUMBER> --api-key <API>
-	```
+```
+uv run python applications_to_csv.py --api-base <URL> --ggis-reference-number <GGIS_REFERENCE_NUMBER> --api-key <API>
+```
 
-### How to run tests
+## How to run tests
 ```
 python3 -m unittest
 ```
