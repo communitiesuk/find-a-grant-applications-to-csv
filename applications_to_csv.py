@@ -23,13 +23,14 @@ import argparse
 import csv
 import json
 import random
-import subprocess
+import requests
 import sys
 import time
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Throttle delay (seconds) between paginated curl requests
 PAGE_REQUEST_DELAY = 0
@@ -99,14 +100,12 @@ def add_page_param(base_url: str, param: str, page: int) -> str:
     q.append((param, str(page)))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
 
-# ------------------------- curl runner -------------------------
+# ------------------------- HTTP runner -------------------------
 
-def run_curl_json(
-    curl_path: str,
+def run_http_json(
     url: str,
     api_key: str,
     *,
-    user_agent: str = "curl/8.6.0",
     timeout: int = 60,
     max_retries: int = 3,
     backoff_base: float = 0.4,
@@ -114,51 +113,59 @@ def run_curl_json(
     verbose: bool = False,
 ) -> Dict[str, Any]:
     """
-    Invoke curl to GET JSON with x-api-key header (key is provided via --api-key).
-    Retries curl failures with exponential backoff + jitter.
+    Fetch JSON from the API using urllib.request with x-api-key header.
+    Retries HTTP failures with exponential backoff + jitter.
     """
     api_key = api_key.strip()
     attempt = 0
     last_err: str | None = None
 
     while True:
+        if attempt > 0:
+            delay = min(backoff_base * (2 ** (attempt - 1)), backoff_cap) + random.uniform(0, backoff_base / 2)
+            time.sleep(delay)
+        else:
+            # Add a small delay before the first request to avoid hammering the API
+            time.sleep(0.5)
         attempt += 1
-        cmd = [
-            curl_path,
-            "-sS",
-            "--fail-with-body",     # requires curl >= 7.76; remove if not available
-            "--max-time", str(timeout),
-            "-H", f"x-api-key: {api_key}",
-            "-H", "Accept: application/json",
-            "-A", user_agent,
-            url,
-        ]
-        if verbose:
-            print(f"[curl attempt {attempt}] {url}", file=sys.stderr)
-
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-
-        if proc.returncode == 0:
-            text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        headers = {
+            "x-api-key": api_key,
+            "Accept": "application/json"
+        }
+        try:
+            if verbose:
+                print(f"[http attempt {attempt}] {url}", file=sys.stderr)
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            text = resp.text
+            if resp.status_code == 403:
+                last_err = f"HTTP 403: Forbidden"
+                if verbose:
+                    print(f"[http error] HTTPError: {last_err}", file=sys.stderr)
+                raise requests.HTTPError(last_err)
+            resp.raise_for_status()
             try:
                 data = json.loads(text)
             except json.JSONDecodeError:
                 snippet = (text[:300] + "…") if len(text) > 300 else text
-                raise RuntimeError(f"curl returned non-JSON response (len={len(text)}). Snippet: {snippet}")
-            # API Gateway-style error guard
+                raise RuntimeError(f"HTTP returned non-JSON response (len={len(text)}). Snippet: {snippet}")
             if isinstance(data, dict) and data.get("Message", "").lower().find("not authorized") >= 0:
                 raise RuntimeError(f"API responded with error: {data}")
             return data
-
-        last_err = proc.stderr.strip() or f"curl exit {proc.returncode}"
-        if verbose:
-            print(f"[curl error] rc={proc.returncode} stderr:\n{last_err}\n", file=sys.stderr)
+        except requests.HTTPError as e:
+            last_err = str(e)
+            if verbose:
+                print(f"[http error] HTTPError: {last_err}", file=sys.stderr)
+        except requests.RequestException as e:
+            last_err = str(e)
+            if verbose:
+                print(f"[http error] RequestException: {last_err}", file=sys.stderr)
+        except Exception as e:
+            last_err = str(e)
+            if verbose:
+                print(f"[http error] Exception: {last_err}", file=sys.stderr)
 
         if attempt >= max_retries:
-            raise RuntimeError(f"curl failed after {max_retries} attempts: {last_err}")
-
-        delay = min(backoff_base * (2 ** (attempt - 1)), backoff_cap) + random.uniform(0, backoff_base / 2)
-        time.sleep(delay)
+            raise RuntimeError(f"HTTP failed after {max_retries} attempts: {last_err}")
 
 # ------------------------- shape coercion & pagination -------------------------
 
@@ -204,13 +211,12 @@ def find_total_pages(doc: Dict[str, Any]) -> int:
     if isinstance(t, str) and t.isdigit(): return int(t)
     return 1
 
-def aggregate_all_pages_curl(
-    curl_path: str,
+def aggregate_all_pages_http(
     base_url: str,
     api_key: str,
 ) -> Dict[str, Any]:
-    first = run_curl_json(
-        curl_path, base_url, api_key,
+    first = run_http_json(
+        base_url, api_key,
     )
     total_pages = max(find_total_pages(first), 1)
     if total_pages <= 1:
@@ -234,16 +240,26 @@ def aggregate_all_pages_curl(
     def extend_top_subs(target: Dict[str, Any], page_data: Dict[str, Any]) -> None:
         target.setdefault("submissions", []).extend(page_data.get("submissions", []) or [])
 
-    param = "pageNumber" 
-    for p in range(2, total_pages + 1):
-        url_p = add_page_param(base_url, param, p)
-        time.sleep(0.5)
-        page_data = run_curl_json(
-            curl_path, url_p, api_key,
-        )
-        extend_app_list(merged, page_data)
-        extend_app_obj(merged, page_data)
-        extend_top_subs(merged, page_data)
+    param = "pageNumber"
+    page_urls = [add_page_param(base_url, param, p) for p in range(2, total_pages + 1)]
+    page_results = [None] * (total_pages - 1)
+
+    # Fetch pages 2..N in parallel
+    with ThreadPoolExecutor(max_workers=min(8, len(page_urls))) as executor:
+        future_to_idx = {executor.submit(run_http_json, url, api_key): idx for idx, url in enumerate(page_urls)}
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                page_results[idx] = future.result()
+            except Exception as exc:
+                raise RuntimeError(f"Failed to fetch page {idx+2}: {exc}")
+
+    # Merge all pages
+    for page_data in page_results:
+        if page_data is not None:
+            extend_app_list(merged, page_data)
+            extend_app_obj(merged, page_data)
+            extend_top_subs(merged, page_data)
 
     return merged
 
@@ -384,8 +400,7 @@ def main() -> None:
         out_path = args.output_csv
     else:
         # Fetch applicationFormName from the first application (if available)
-        merged_preview = aggregate_all_pages_curl(
-            "curl",
+        merged_preview = aggregate_all_pages_http(
             base_url,
             args.api_key,
         )
@@ -411,8 +426,7 @@ def main() -> None:
     base_url = f"{api_base}{path}"
 
     # 1) Aggregate all pages via curl (throttled)
-    merged = aggregate_all_pages_curl(
-        "curl",
+    merged = aggregate_all_pages_http(
         base_url,
         args.api_key,
     )

@@ -1,0 +1,11 @@
+[project]
+name = "find-a-grant-submissions-to-csv"
+version = "0.1.0"
+description = "Fetch submissions from the Find A Grant Open Data API and output as CSV."
+requires-python = ">=3.8"
+dependencies = [
+    "requests>=2.31.0"
+]
+
+[tool.uv]
+# No special config needed for basic sync/run
