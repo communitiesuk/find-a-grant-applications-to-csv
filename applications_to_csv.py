@@ -13,13 +13,13 @@ USAGE (examples)
     # Minimal (1 req/s, drop constants, add blank section separators):
     ./applications_to_csv.py applications.csv \
       --api-base 'https://api.example.gov.uk' \
-      --grant-ref 'XX-XXXX-YYYY' \
+      --ggis-reference-number 'XX-XXXX-XXXX' \
       --api-key 'YOUR_API_KEY'
 
     # Slower throttle and TSV:
     ./applications_to_csv.py applications.tsv \
       --api-base 'https://api.example.gov.uk' \
-      --grant-ref 'XX-XXXX-YYYY' \
+      --ggis-reference-number 'XX-XXXX-XXXX' \
       --api-key 'YOUR_API_KEY' \
       --sleep-seconds 1.5 \
       --delimiter '\t'
@@ -27,7 +27,7 @@ USAGE (examples)
     # Keep constant columns and include section-title prefixes + question IDs:
     ./applications_to_csv.py applications.csv \
       --api-base 'https://api.example.gov.uk' \
-      --grant-ref 'XX-XXXX-YYYY' \
+      --ggis-reference-number 'XX-XXXX-XXXX' \
       --api-key 'YOUR_API_KEY' \
       --keep-constants \
       --prefix-section-title \
@@ -119,60 +119,33 @@ def run_curl_json(
     curl_path: str,
     url: str,
     api_key: str,
-    *,
-    user_agent: str = "curl/8.6.0",
-    timeout: int = 60,
-    max_retries: int = 3,
-    backoff_base: float = 0.4,
-    backoff_cap: float = 4.0,
-    verbose: bool = False,
 ) -> Dict[str, Any]:
     """
     Invoke curl to GET JSON with x-api-key header (key is provided via --api-key).
     Retries curl failures with exponential backoff + jitter.
     """
     api_key = api_key.strip()
-    attempt = 0
-    last_err: str | None = None
-
-    while True:
-        attempt += 1
-        cmd = [
-            curl_path,
-            "-sS",
-            "--fail-with-body",     # requires curl >= 7.76; remove if not available
-            "--max-time", str(timeout),
-            "-H", f"x-api-key: {api_key}",
-            "-H", "Accept: application/json",
-            "-A", user_agent,
-            url,
-        ]
-        if verbose:
-            print(f"[curl attempt {attempt}] {url}", file=sys.stderr)
-
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-
-        if proc.returncode == 0:
-            text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                snippet = (text[:300] + "…") if len(text) > 300 else text
-                raise RuntimeError(f"curl returned non-JSON response (len={len(text)}). Snippet: {snippet}")
-            # API Gateway-style error guard
-            if isinstance(data, dict) and data.get("Message", "").lower().find("not authorized") >= 0:
-                raise RuntimeError(f"API responded with error: {data}")
-            return data
-
-        last_err = proc.stderr.strip() or f"curl exit {proc.returncode}"
-        if verbose:
-            print(f"[curl error] rc={proc.returncode} stderr:\n{last_err}\n", file=sys.stderr)
-
-        if attempt >= max_retries:
-            raise RuntimeError(f"curl failed after {max_retries} attempts: {last_err}")
-
-        delay = min(backoff_base * (2 ** (attempt - 1)), backoff_cap) + random.uniform(0, backoff_base / 2)
-        time.sleep(delay)
+    cmd = [
+        curl_path,
+        "-sS",
+        "--fail-with-body",
+        "-H", f"x-api-key: {api_key}",
+        "-H", "Accept: application/json",
+        url,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            snippet = (text[:300] + "…") if len(text) > 300 else text
+            raise RuntimeError(f"curl returned non-JSON response (len={len(text)}). Snippet: {snippet}")
+        if isinstance(data, dict) and data.get("Message", "").lower().find("not authorized") >= 0:
+            raise RuntimeError(f"API responded with error: {data}")
+        return data
+    last_err = proc.stderr.strip() or f"curl exit {proc.returncode}"
+    raise RuntimeError(f"curl failed: {last_err}")
 
 # ------------------------- shape coercion & pagination -------------------------
 
@@ -222,19 +195,9 @@ def aggregate_all_pages_curl(
     curl_path: str,
     base_url: str,
     api_key: str,
-    *,
-    sleep_seconds: float,
-    user_agent: str,
-    timeout: int,
-    curl_retries: int,
-    backoff_base: float,
-    backoff_cap: float,
-    verbose: bool,
 ) -> Dict[str, Any]:
     first = run_curl_json(
         curl_path, base_url, api_key,
-        user_agent=user_agent, timeout=timeout, max_retries=curl_retries,
-        backoff_base=backoff_base, backoff_cap=backoff_cap, verbose=verbose,
     )
     total_pages = max(find_total_pages(first), 1)
     if total_pages <= 1:
@@ -258,14 +221,11 @@ def aggregate_all_pages_curl(
     def extend_top_subs(target: Dict[str, Any], page_data: Dict[str, Any]) -> None:
         target.setdefault("submissions", []).extend(page_data.get("submissions", []) or [])
 
-    param = "pageNumber"  # change to "page" if your environment uses ?page=
+    param = "pageNumber"
     for p in range(2, total_pages + 1):
         url_p = add_page_param(base_url, param, p)
-        time.sleep(max(0.0, sleep_seconds))  # throttle
         page_data = run_curl_json(
             curl_path, url_p, api_key,
-            user_agent=user_agent, timeout=timeout, max_retries=curl_retries,
-            backoff_base=backoff_base, backoff_cap=backoff_cap, verbose=verbose,
         )
         extend_app_list(merged, page_data)
         extend_app_obj(merged, page_data)
@@ -381,41 +341,12 @@ def parse_args() -> argparse.Namespace:
         description="Fetch submissions via curl (throttled), flatten to CSV, add 'Section: <name>' separators in JSON order, drop constant columns by default.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument("output_csv", type=Path, nargs="?", help="Output CSV (default: applications.csv)")
+    ap.add_argument("output_csv", type=Path, nargs="?", help="Output CSV (default: auto-named)")
     ap.add_argument("--api-base", required=True, help="Base URL (no trailing slash), e.g., 'https://api.example.gov.uk'")
-    ap.add_argument("--submissions-path", default="/api/open-data/submissions/{grantRef}",
-                    help="Path template for submissions endpoint, must include {grantRef}")
-    ap.add_argument("--grant-ref", required=True, help="Grant reference to insert into {grantRef} path template")
+    ap.add_argument("--submissions-path", default="/api/open-data/submissions/{ggisReferenceNumber}",
+                    help="Path template for submissions endpoint, must include {ggisReferenceNumber}")
+    ap.add_argument("--ggis-reference-number", required=True, help="GGIS reference number to insert into {ggisReferenceNumber} path template")
     ap.add_argument("--api-key", required=True, help="API key for the 'x-api-key' header (REQUIRED)")
-    ap.add_argument("--curl-path", default="curl", help="Path to curl binary")
-    ap.add_argument("--sleep-seconds", type=float, default=1.0, help="Seconds to sleep between page requests")
-    ap.add_argument("--user-agent", default="curl/8.6.0", help="User-Agent to send via curl (-A)")
-    ap.add_argument("--timeout-seconds", type=int, default=60, help="Per-call curl max time")
-    ap.add_argument("--curl-retries", type=int, default=3, help="Retries for curl non-zero exits")
-    ap.add_argument("--backoff-base", type=float, default=0.4, help="Base backoff (curl retry) seconds")
-    ap.add_argument("--backoff-cap", type=float, default=4.0, help="Max backoff cap (curl retry) seconds")
-    ap.add_argument("--verbose", action="store_true", help="Print progress to stderr")
-    ap.add_argument("--delimiter", default=",", help="CSV delimiter (',' or '\\t')")
-
-    # Column naming tweaks for question columns
-    ap.add_argument("--prefix-section-title", action="store_true", help="Prefix question headers with sectionTitle__")
-    ap.add_argument("--include-question-id", action="store_true", help="Append __<questionId> to question headers")
-
-    # Section separator columns
-    gsep = ap.add_mutually_exclusive_group()
-    gsep.add_argument("--section-separators", dest="section_separators", action="store_true", help="Insert 'Section: <name>' separator columns")
-    gsep.add_argument("--no-section-separators", dest="section_separators", action="store_false", help="Do not insert section separators")
-    ap.set_defaults(section_separators=True)
-
-    # Constant-column handling
-    g = ap.add_mutually_exclusive_group()
-    g.add_argument("--drop-constant-columns", dest="drop_constants", action="store_true", help="Drop constant-value columns")
-    g.add_argument("--keep-constants", dest="drop_constants", action="store_false", help="Keep constant-value columns")
-    ap.set_defaults(drop_constants=True)
-
-    ap.add_argument("--constant-ignore-empty", action="store_true", help="Ignore empties when testing constancy")
-    ap.add_argument("--keep-col", action="append", default=[], help="Regex (repeatable) of columns to force-keep")
-
     return ap.parse_args()
 
 # ------------------------- Main -------------------------
@@ -423,13 +354,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    out_path: Path = args.output_csv or Path("applications.csv")
+    import datetime
+    if args.output_csv:
+        out_path = args.output_csv
+    else:
+        today = datetime.date.today()
+        out_path = Path(f"{args.ggis_reference_number}-applications-{today.year}-{today.month:02d}-{today.day:02d}.csv")
 
     # Construct base submissions URL from arguments
-    if "{grantRef}" not in args.submissions_path:
-        print("ERROR: --submissions-path must include '{grantRef}' placeholder.", file=sys.stderr)
+    if "{ggisReferenceNumber}" not in args.submissions_path:
+        print("ERROR: --submissions-path must include '{ggisReferenceNumber}' placeholder.", file=sys.stderr)
         sys.exit(2)
-    path = args.submissions_path.replace("{grantRef}", args.grant_ref)
+    path = args.submissions_path.replace("{ggisReferenceNumber}", args.ggis_reference_number)
     api_base = args.api_base.rstrip("/")
     if not path.startswith("/"):
         path = "/" + path
@@ -437,79 +373,36 @@ def main() -> None:
 
     # 1) Aggregate all pages via curl (throttled)
     merged = aggregate_all_pages_curl(
-        args.curl_path,
+        "curl",
         base_url,
         args.api_key,
-        sleep_seconds=args.sleep_seconds,
-        user_agent=args.user_agent,
-        timeout=args.timeout_seconds,
-        curl_retries=args.curl_retries,
-        backoff_base=args.backoff_base,
-        backoff_cap=args.backoff_cap,
-        verbose=args.verbose,
     )
 
     # 2) Extract rows (meta + questions + per-row ordered blocks)
+
     pairs = coerce_to_pairs(merged)
-    # Build ordered headers: meta first, then for each row: Section + its question columns
     meta_order: List[str] = [sanitize_col(k) for k in (
         "applicationFormName","applicationFormVersion","applicationId","ggisReferenceNumber","grantAdminEmailAddress"
     )] + [sanitize_col(k) for k in ("submissionId","grantApplicantEmailAddress","submittedTimeStamp","gapId")]
     seen_headers = set(meta_order)
     final_headers: List[str] = list(dict.fromkeys(meta_order))
 
-    cache: List[Tuple[Dict[str, Any], Dict[str, Any], List[Tuple[str, List[str]]]]] = []
-    all_cols_seen: set[str] = set(final_headers)
-
-    for root_meta, sub in pairs:
-        meta, dyn, blocks = extract_row(
-            root_meta, sub,
-            include_qid=args.include_question_id,
-            prefix_section=args.prefix_section_title,
-            add_section_separators=args.section_separators,
-        )
-        cache.append((meta, dyn, blocks))
-        all_cols_seen.update(meta.keys())
-        all_cols_seen.update(dyn.keys())
-
-        for section_header, block_cols in blocks:
-            if section_header and section_header not in seen_headers:
-                final_headers.append(section_header); seen_headers.add(section_header)
-            for col in block_cols:
-                if col not in seen_headers:
-                    final_headers.append(col); seen_headers.add(col)
-
-    for c in all_cols_seen:
-        if c not in seen_headers:
-            final_headers.append(c); seen_headers.add(c)
-
-    # 3) Materialize CSV rows
     rows: List[Dict[str, Any]] = []
-    for meta, dyn, blocks in cache:
+    for root_meta, sub in pairs:
+        meta, dyn, blocks = extract_row(root_meta, sub, include_qid=False, prefix_section=False, add_section_separators=True)
         row = {h: "" for h in final_headers}
         row.update(meta)
         row.update(dyn)
         rows.append(row)
 
-    # 4) Drop constant columns unless disabled (NEVER drop “Section: …”)
-    if args.drop_constants and rows:
-        keep_patterns = [re.compile(p) for p in (args.keep_col or [])]
-        keep_patterns.append(re.compile(r"^Section:\s"))  # keep all section separators
-        rows, _ = drop_constant_columns(
-            rows,
-            ignore_empty=args.constant_ignore_empty,
-            keep_patterns=keep_patterns,
-        )
-        if rows:
-            final_headers = list(rows[0].keys())
-
-    # 5) Write CSV
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=final_headers, extrasaction="ignore", delimiter=args.delimiter)
+        writer = csv.DictWriter(f, fieldnames=final_headers, extrasaction="ignore", delimiter=",")
         writer.writeheader()
         for r in rows:
             writer.writerow(r)
+
+    print(f"Output written to: {out_path}")
 
 if __name__ == "__main__":
     main()
