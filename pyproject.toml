@@ -4,8 +4,22 @@ version = "0.1.0"
 description = "Fetch submissions from the Find A Grant Open Data API and output as CSV."
 requires-python = ">=3.8"
 dependencies = [
-    "requests>=2.31.0"
+    "click>=8.1.8",
+    "mypy>=1.14.1",
+    "pre-commit>=3.5.0",
+    "requests>=2.31.0",
+    "types-requests>=2.32.0.20241016",
 ]
 
-[tool.uv]
-# No special config needed for basic sync/run
+[tool.mypy]
+python_version = "3.11"
+strict = true
+ignore_missing_imports = false
+explicit_package_bases = true
+packages = ["find_a_grant_csv"]
+
+[tool.mypy-find_a_grant_csv.http_client]
+ignore_errors = true
+
+[tool.importlinter]
+root_package = "find_a_grant_csv"
