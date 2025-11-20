@@ -18,7 +18,7 @@ from find_a_grant_csv.cli import run_pipeline_sync
 @click.option(
     "--ggis-reference-number",
     required=True,
-    help="GGIS reference number for the submissions endpoint",
+    help="GGIS reference number for the grant",
 )
 @click.option("--api-key", required=True, help="API key for the 'x-api-key' header")
 def cli(
