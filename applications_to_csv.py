@@ -20,7 +20,7 @@ from find_a_grant_csv.cli import run_pipeline_sync
     required=True,
     help="GGIS reference number for the grant",
 )
-@click.option("--api-key", required=True, help="API key for the 'x-api-key' header")
+@click.option("--api-key", required=True, help="API key for Find A Grant service API")
 def cli(
     output_csv: Path | None, api_base: str, ggis_reference_number: str, api_key: str
 ) -> None:
